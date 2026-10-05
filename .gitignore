@@ -1,0 +1,10 @@
+.env
+data/
+*.zip
+.copilot-azure/
+node_modules/
+/work/
+/outputs/
+.DS_Store
+app-settings.txt
+apply-settings.ps1
