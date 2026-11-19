@@ -434,13 +434,25 @@
           <button class="btn btn-ghost btn-sm" onclick="exportAssetsCSV()">⬇ Export CSV</button>
           <button class="btn btn-ghost btn-sm" onclick="triggerImport('import-assets')">⬆ Import CSV</button>
           <input type="file" id="import-assets" accept=".csv" style="display:none;" onchange="importAssetsCSV(event)">
+          <button class="btn btn-ghost btn-sm" onclick="openAssetTransferModal()">⇄ Transfer asset</button>
+          <button class="btn btn-ghost btn-sm" onclick="openAssetDisposalModal()">♻ Dispose asset</button>
           <button class="btn btn-accent" onclick="openAssetModal()">+ Register asset</button>
         </div>
       </div>
       <div class="panel">
-        <table><thead><tr><th>Tag</th><th>Name</th><th>Category</th><th>Centre</th><th>Location</th><th>Assigned worker</th><th>Status</th><th>Value</th><th></th></tr></thead>
+        <table><thead><tr><th>Tag</th><th>Image</th><th>Name</th><th>Category</th><th>Centre</th><th>Location</th><th>Assigned worker</th><th>Status</th><th>Value</th><th></th></tr></thead>
         <tbody id="assets-body"></tbody></table>
         <div class="empty" id="assets-empty" style="display:none;"><div class="big">No assets yet</div>Register your first asset to start tracking it.</div>
+      </div>
+      <div class="panel" style="margin-top:16px;">
+        <div class="panel-head"><div><h2>Asset transfer register</h2><div class="sub">Transfer history with photo evidence</div></div></div>
+        <table><thead><tr><th>Date</th><th>Asset</th><th>From</th><th>To</th><th>Reason</th><th>Evidence</th></tr></thead><tbody id="asset-transfers-body"></tbody></table>
+        <div class="empty" id="asset-transfers-empty" style="display:none;">No asset transfers recorded.</div>
+      </div>
+      <div class="panel" style="margin-top:16px;">
+        <div class="panel-head"><div><h2>Asset disposal register</h2><div class="sub">Disposal records with photo evidence</div></div></div>
+        <table><thead><tr><th>Date</th><th>Asset</th><th>Centre</th><th>Reason</th><th>Evidence</th></tr></thead><tbody id="asset-disposals-body"></tbody></table>
+        <div class="empty" id="asset-disposals-empty" style="display:none;">No asset disposals recorded.</div>
       </div>
     </section>
 
@@ -864,6 +876,8 @@ function normalizeData(){
   if(!DATA.adminSettings.m365Folder) DATA.adminSettings.m365Folder=DATA.sharepointFolder||'PID Facilities Reports';
   if(!DATA.adminSettings.m365SiteId) DATA.adminSettings.m365SiteId=DATA.sharepointSiteId||'';
   if(!DATA.assets) DATA.assets = [];
+  if(!DATA.assetTransfers) DATA.assetTransfers = [];
+  if(!DATA.assetDisposals) DATA.assetDisposals = [];
   if(!DATA.workOrders) DATA.workOrders = [];
   if(!DATA.pmTasks) DATA.pmTasks = [];
   if(!DATA.projects) DATA.projects = [];
@@ -1521,9 +1535,32 @@ function renderCentres(){
 }
 
 /* ---------- ASSETS ---------- */
+const ASSET_EVIDENCE_LIMIT_BYTES = 300 * 1024;
+function readAssetEvidence(fileInputId, required=true){
+  const input=document.getElementById(fileInputId), file=input&&input.files&&input.files[0];
+  if(!file){ if(required) showToast('Add a photo as evidence'); return Promise.resolve(null); }
+  if(!file.type.startsWith('image/')){ showToast('Choose an image file'); input.value=''; return Promise.resolve(null); }
+  if(file.size>ASSET_EVIDENCE_LIMIT_BYTES){ showToast('Choose an image smaller than 300 KB'); input.value=''; return Promise.resolve(null); }
+  return new Promise(resolve=>{
+    const reader=new FileReader();
+    reader.onload=()=>resolve({name:file.name,mimeType:file.type,dataUrl:reader.result});
+    reader.onerror=()=>{showToast('Could not read the image');resolve(null);};
+    reader.readAsDataURL(file);
+  });
+}
+function assetEvidencePreview(inputId,previewId){
+  const input=document.getElementById(inputId), file=input&&input.files&&input.files[0], preview=document.getElementById(previewId);
+  if(!preview) return;
+  if(!file){preview.innerHTML='';return;}
+  if(!file.type.startsWith('image/')||file.size>ASSET_EVIDENCE_LIMIT_BYTES){showToast('Choose an image smaller than 300 KB');input.value='';preview.innerHTML='';return;}
+  const reader=new FileReader(); reader.onload=()=>{preview.innerHTML='<img src="'+reader.result+'" alt="Evidence preview" style="max-width:180px;max-height:120px;border-radius:6px;border:1px solid var(--border);">';}; reader.readAsDataURL(file);
+}
+function assetEvidenceCell(evidence){
+  return evidence&&evidence.dataUrl ? '<a href="'+evidence.dataUrl+'" target="_blank" rel="noopener"><img src="'+evidence.dataUrl+'" alt="View evidence photo" title="'+escapeHtml(evidence.name||'Evidence photo')+'" style="width:54px;height:42px;object-fit:cover;border-radius:5px;border:1px solid var(--border);"></a>' : '—';
+}
 function openAssetModal(){
   openModal(`
-    <h3>Register asset</h3><div class="modal-sub">Add a new tracked facility asset</div>
+    <h3>Register asset</h3><div class="modal-sub">Add a new tracked facility asset and a photo for its record</div>
     <div class="field"><label>Name</label><input id="f-name" placeholder="e.g. Rooftop AHU 2"></div>
     <div class="row2">
       <div class="field"><label>Category</label><input id="f-cat" placeholder="e.g. HVAC"></div>
@@ -1538,14 +1575,16 @@ function openAssetModal(){
       <div class="field"><label>Purchase date</label><input id="f-date" type="date"></div>
     </div>
     <div class="field"><label>Assigned worker</label><select id="f-worker"><option value="">— Unassigned —</option>${userOptions()}</select></div>
+    <div class="field"><label>Asset photo (required)</label><input id="f-image" type="file" accept="image/*" capture="environment" onchange="assetEvidencePreview('f-image','f-image-preview')"><span class="field-hint">Photo is saved with the asset record. Maximum 300 KB.</span><div id="f-image-preview" style="margin-top:8px;"></div></div>
     <div class="modal-actions"><button class="btn btn-ghost" onclick="closeModal()">Cancel</button><button class="btn btn-accent" onclick="saveAsset()">Register asset</button></div>
   `);
 }
-function saveAsset(){
+async function saveAsset(){
   const name = document.getElementById('f-name').value.trim();
   if(!name){ showToast('Asset name is required'); return; }
+  const evidence=await readAssetEvidence('f-image',true); if(!evidence) return;
   DATA.assets.push({
-    id: nextId('AST','asset'), name,
+    id: nextId('AST','asset'), name, imageEvidence:evidence,
     category: document.getElementById('f-cat').value.trim() || 'Uncategorized',
     centreId: document.getElementById('f-centre').value,
     location: document.getElementById('f-loc').value.trim() || '—',
@@ -1554,7 +1593,48 @@ function saveAsset(){
     purchaseDate: document.getElementById('f-date').value || '',
     assignedWorkerId: document.getElementById('f-worker').value || ''
   });
-  persist(); closeModal(); renderAll(); showToast('Asset registered');
+  await persist(); closeModal(); renderAll(); showToast('Asset registered with photo evidence');
+}
+function openAssetTransferModal(){
+  const assets=DATA.assets.filter(a=>a.status!=='disposed');
+  if(!assets.length){showToast('Register an active asset first');return;}
+  openModal(`<h3>Transfer asset</h3><div class="modal-sub">Record the new location and attach photo evidence</div>
+    <div class="field"><label>Asset</label><select id="at-asset">${assets.map(a=>'<option value="'+escapeHtml(a.id)+'">'+escapeHtml(a.id+' — '+a.name)+'</option>').join('')}</select></div>
+    <div class="row2"><div class="field"><label>Destination centre</label><select id="at-centre">${centreOptions()}</select></div><div class="field"><label>New location</label><input id="at-location" placeholder="Building, floor, room"></div></div>
+    <div class="field"><label>Reason / transfer reference</label><textarea id="at-reason" placeholder="Why is this item being transferred?"></textarea></div>
+    <div class="field"><label>Transfer photo evidence (required)</label><input id="at-image" type="file" accept="image/*" capture="environment" onchange="assetEvidencePreview('at-image','at-image-preview')"><span class="field-hint">Maximum 300 KB.</span><div id="at-image-preview" style="margin-top:8px;"></div></div>
+    <div class="modal-actions"><button class="btn btn-ghost" onclick="closeModal()">Cancel</button><button class="btn btn-accent" onclick="saveAssetTransfer()">Record transfer</button></div>`);
+}
+async function saveAssetTransfer(){
+  const asset=assetById(document.getElementById('at-asset').value), centreId=document.getElementById('at-centre').value;
+  const reason=document.getElementById('at-reason').value.trim(), location=document.getElementById('at-location').value.trim();
+  const evidence=await readAssetEvidence('at-image',true); if(!evidence)return;
+  if(!asset){showToast('Choose an asset');return;}
+  if(!centreId){showToast('Choose a destination centre');return;}
+  if(!reason){showToast('Add a transfer reason or reference');return;}
+  const fromCentre=centreById(asset.centreId), toCentre=centreById(centreId);
+  DATA.assetTransfers.push({id:nextId('TRF','transfer'),assetId:asset.id,date:new Date().toISOString().slice(0,10),fromCentreId:asset.centreId,fromLocation:asset.location,toCentreId:centreId,toLocation:location||'—',reason,evidence});
+  asset.centreId=centreId; asset.location=location||'—';
+  await persist();closeModal();renderAll();showToast('Asset transfer recorded with photo evidence');
+}
+function openAssetDisposalModal(){
+  const assets=DATA.assets.filter(a=>a.status!=='disposed');
+  if(!assets.length){showToast('No active assets are available to dispose');return;}
+  openModal(`<h3>Dispose asset</h3><div class="modal-sub">Record the disposal and attach photo evidence</div>
+    <div class="field"><label>Asset</label><select id="ad-asset">${assets.map(a=>'<option value="'+escapeHtml(a.id)+'">'+escapeHtml(a.id+' — '+a.name)+'</option>').join('')}</select></div>
+    <div class="field"><label>Disposal reason / reference</label><textarea id="ad-reason" placeholder="Condition, method, approval or reference"></textarea></div>
+    <div class="field"><label>Disposal photo evidence (required)</label><input id="ad-image" type="file" accept="image/*" capture="environment" onchange="assetEvidencePreview('ad-image','ad-image-preview')"><span class="field-hint">Maximum 300 KB.</span><div id="ad-image-preview" style="margin-top:8px;"></div></div>
+    <div class="modal-actions"><button class="btn btn-ghost" onclick="closeModal()">Cancel</button><button class="btn btn-danger" onclick="saveAssetDisposal()">Record disposal</button></div>`);
+}
+async function saveAssetDisposal(){
+  const asset=assetById(document.getElementById('ad-asset').value),reason=document.getElementById('ad-reason').value.trim();
+  if(!asset){showToast('Choose an asset');return;}
+  if(!reason){showToast('Add a disposal reason or reference');return;}
+  const evidence=await readAssetEvidence('ad-image',true);if(!evidence)return;
+  const centre=centreById(asset.centreId);
+  DATA.assetDisposals.push({id:nextId('DSP','disposal'),assetId:asset.id,date:new Date().toISOString().slice(0,10),centreId:asset.centreId,reason,evidence});
+  asset.status='disposed';
+  await persist();closeModal();renderAll();showToast('Asset disposal recorded with photo evidence');
 }
 function deleteAsset(id){ DATA.assets = DATA.assets.filter(a=>a.id!==id); persist(); renderAll(); showToast('Asset removed'); }
 function exportAssetsCSV(){
@@ -1594,14 +1674,20 @@ function renderAssets(){
     const c = centreById(a.centreId);
     const worker = userById(a.assignedWorkerId);
     return `<tr>
-      <td><span class="tag">${a.id}</span></td><td>${a.name}</td><td>${a.category}</td>
-      <td>${c?c.name:'—'}</td><td>${a.location}</td>
-      <td>${worker ? worker.name : '<span style="color:var(--ink-soft);">Unassigned</span>'}</td>
+      <td><span class="tag">${escapeHtml(a.id)}</span></td><td>${assetEvidenceCell(a.imageEvidence)}</td><td>${escapeHtml(a.name)}</td><td>${escapeHtml(a.category)}</td>
+      <td>${c?escapeHtml(c.name):'—'}</td><td>${escapeHtml(a.location)}</td>
+      <td>${worker ? escapeHtml(worker.name) : '<span style="color:var(--ink-soft);">Unassigned</span>'}</td>
       <td>${pill(a.status)}</td>
       <td style="font-family:var(--font-mono);">${fmtMoney(a.value)}</td>
       <td><button class="btn btn-danger btn-sm" onclick="deleteAsset('${a.id}')">Remove</button></td>
     </tr>`;
   }).join('');
+  const transfers=DATA.assetTransfers||[], disposals=DATA.assetDisposals||[];
+  const transferBody=document.getElementById('asset-transfers-body'), disposalBody=document.getElementById('asset-disposals-body');
+  transferBody.innerHTML=transfers.slice().reverse().map(t=>{const a=assetById(t.assetId),from=centreById(t.fromCentreId),to=centreById(t.toCentreId);return `<tr><td>${fmtDate(t.date)}</td><td>${escapeHtml(a?a.name:t.assetId)}</td><td>${escapeHtml((from&&from.name||'—')+(t.fromLocation?' · '+t.fromLocation:''))}</td><td>${escapeHtml((to&&to.name||'—')+(t.toLocation?' · '+t.toLocation:''))}</td><td>${escapeHtml(t.reason)}</td><td>${assetEvidenceCell(t.evidence)}</td></tr>`;}).join('');
+  disposalBody.innerHTML=disposals.slice().reverse().map(d=>{const a=assetById(d.assetId),c=centreById(d.centreId);return `<tr><td>${fmtDate(d.date)}</td><td>${escapeHtml(a?a.name:d.assetId)}</td><td>${escapeHtml(c?c.name:'—')}</td><td>${escapeHtml(d.reason)}</td><td>${assetEvidenceCell(d.evidence)}</td></tr>`;}).join('');
+  document.getElementById('asset-transfers-empty').style.display=transfers.length?'none':'block';
+  document.getElementById('asset-disposals-empty').style.display=disposals.length?'none':'block';
 }
 
 /* ---------- WORK ORDERS ---------- */
